@@ -292,6 +292,7 @@ static void playout_source_update(void *data, obs_data_t *settings)
 		obs_data_set_bool(ss, "restart_on_activate", false);
 
 		dstr_printf(&setting_name, "speed_percent%d", i);
+		obs_data_set_default_int(settings, setting_name.array, 100);
 		playout->items.array[i].speed = (uint32_t)obs_data_get_int(settings, setting_name.array);
 		if (!playout->items.array[i].speed)
 			playout->items.array[i].speed = 100;
@@ -533,6 +534,8 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 	dstr_init(&setting_name);
 	long long action = obs_data_get_int(settings, "action");
 	if (action == PLAYOUT_ACTION_ADD_ITEM_TOP) {
+		dstr_printf(&setting_name, "speed_percent%d", (int)playout->items.num);
+		obs_data_set_default_int(settings, setting_name.array, 100);
 		for (size_t i = playout->items.num; i > 0; i--) {
 			playout_source_switch_item_settings(settings, i, i - 1, &setting_name);
 		}
@@ -541,7 +544,8 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 		obs_properties_add_text(props, "plugin_info", PLUGIN_INFO, OBS_TEXT_INFO);
 		da_insert_new(playout->items, 0);
 	} else if (action == PLAYOUT_ACTION_ADD_ITEM_BOTTOM) {
-
+		dstr_printf(&setting_name, "speed_percent%d", (int)playout->items.num);
+		obs_data_set_default_int(settings, setting_name.array, 100);
 		obs_properties_remove_by_name(props, "plugin_info");
 		add_item_properties(playout, props, &setting_name, (int)playout->items.num);
 		obs_properties_add_text(props, "plugin_info", PLUGIN_INFO, OBS_TEXT_INFO);
