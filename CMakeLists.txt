@@ -18,7 +18,9 @@ add_library(${PROJECT_NAME} MODULE)
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/version.h.in ${CMAKE_CURRENT_SOURCE_DIR}/version.h)
 
 target_sources(${PROJECT_NAME} PRIVATE
+	audio-wrapper.c
 	playout-source.c
+	audio-wrapper.h
 	playout-source.h
 	version.h)
 

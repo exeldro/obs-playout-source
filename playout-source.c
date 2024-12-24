@@ -1,37 +1,10 @@
+#include "audio-wrapper.h"
 #include "playout-source.h"
 #include "version.h"
 #include <obs-frontend-api.h>
-#include <obs-module.h>
 #include <stdio.h>
 #include <util/dstr.h>
 #include <util/platform.h>
-
-struct playout_source_item {
-	obs_source_t *source;
-	char *section;
-
-	uint64_t start;
-	uint64_t end;
-
-	obs_source_t *transition;
-	uint32_t transition_duration_ms;
-	uint32_t speed;
-};
-
-struct playout_source_context {
-	obs_source_t *source;
-	obs_source_t *current_source;
-	obs_source_t *current_transition;
-	uint32_t current_transition_duration;
-	bool playing;
-	bool auto_play;
-	bool loop;
-	bool next_after_transition;
-	bool switch_to_next;
-	int playback_mode;
-	int current_index;
-	DARRAY(struct playout_source_item) items;
-};
 
 #define PLAYBACK_MODE_LIST 0
 #define PLAYBACK_MODE_SECTION 1
@@ -69,6 +42,11 @@ static void *playout_source_create(obs_data_t *settings, obs_source_t *source)
 	struct playout_source_context *playout = bzalloc(sizeof(struct playout_source_context));
 	playout->source = source;
 	playout->current_index = -1;
+	pthread_mutex_init(&playout->audio_mutex, NULL);
+
+	playout->audio_wrapper = obs_source_create_private(audio_wrapper_source.id, audio_wrapper_source.id, NULL);
+	struct audio_wrapper_info *aw = obs_obj_get_data(playout->audio_wrapper);
+	aw->playout = playout;
 	obs_source_update(source, settings);
 	obs_frontend_add_event_callback(playout_source_frontend_event, playout);
 	return playout;
@@ -77,13 +55,19 @@ static void *playout_source_create(obs_data_t *settings, obs_source_t *source)
 static void playout_source_destroy(void *data)
 {
 	struct playout_source_context *playout = data;
+	if (playout->audio_wrapper) {
+		obs_source_release(playout->audio_wrapper);
+		playout->audio_wrapper = NULL;
+	}
 	obs_frontend_remove_event_callback(playout_source_frontend_event, playout);
 	if (playout->current_source) {
+		obs_source_remove_active_child(playout->source, playout->current_source);
 		obs_source_dec_showing(playout->current_source);
 		obs_source_release(playout->current_source);
 		playout->current_source = NULL;
 	}
 	if (playout->current_transition) {
+		obs_source_remove_active_child(playout->source, playout->current_transition);
 		obs_source_dec_showing(playout->current_transition);
 		obs_source_release(playout->current_transition);
 		playout->current_transition = NULL;
@@ -93,6 +77,7 @@ static void playout_source_destroy(void *data)
 		obs_source_release(playout->items.array[i].transition);
 	}
 	da_free(playout->items);
+	pthread_mutex_destroy(&playout->audio_mutex);
 	bfree(data);
 }
 
@@ -110,6 +95,7 @@ void playout_source_update_current_source(struct playout_source_context *playout
 					     playout->current_transition_duration,
 					     playout->items.array[playout->current_index].source);
 		} else {
+			obs_source_remove_active_child(playout->source, playout->current_transition);
 			obs_source_dec_showing(playout->current_transition);
 			obs_source_release(playout->current_transition);
 			playout->current_transition = NULL;
@@ -117,6 +103,7 @@ void playout_source_update_current_source(struct playout_source_context *playout
 		}
 	}
 	if (playout->current_source) {
+		obs_source_remove_active_child(playout->source, playout->current_source);
 		obs_source_dec_showing(playout->current_source);
 		obs_source_release(playout->current_source);
 	}
@@ -124,10 +111,12 @@ void playout_source_update_current_source(struct playout_source_context *playout
 	if (!playout->current_transition && playout->items.array[playout->current_index].transition) {
 		obs_transition_set(playout->items.array[playout->current_index].transition, playout->current_source);
 		playout->current_transition = obs_source_get_ref(playout->items.array[playout->current_index].transition);
+		obs_source_add_active_child(playout->source, playout->current_transition);
 		obs_source_inc_showing(playout->current_transition);
 		playout->current_transition_duration = playout->items.array[playout->current_index].transition_duration_ms;
 	}
 	if (playout->current_source) {
+		obs_source_add_active_child(playout->source, playout->current_source);
 		obs_source_inc_showing(playout->current_source);
 		if (use_transition) {
 			enum obs_media_state state = obs_source_media_get_state(playout->current_source);
@@ -251,6 +240,7 @@ void playout_source_transition_stop(void *data, calldata_t *cd)
 			playout->current_transition_duration = playout->items.array[playout->current_index].transition_duration_ms;
 		}
 	} else if (playout->current_transition) {
+		obs_source_remove_active_child(playout->source, playout->current_transition);
 		obs_source_dec_showing(playout->current_transition);
 		obs_source_release(playout->current_transition);
 		playout->current_transition = NULL;
@@ -284,7 +274,8 @@ static void playout_source_update(void *data, obs_data_t *settings)
 			obs_data_release(s);
 		}
 		if (!playout->items.array[i].source) {
-			playout->items.array[i].source = obs_source_create_private("ffmpeg_source", "playout_source_item", NULL);
+			dstr_printf(&setting_name, "%s (%d)", obs_source_get_name(playout->source), i + 1);
+			playout->items.array[i].source = obs_source_create_private("ffmpeg_source", setting_name.array, NULL);
 			signal_handler_t *sh = obs_source_get_signal_handler(playout->items.array[i].source);
 			signal_handler_connect(sh, "media_ended", playout_source_media_ended, data);
 		}
@@ -327,7 +318,7 @@ static void playout_source_update(void *data, obs_data_t *settings)
 					obs_source_create_private(transition, "test", transition_settings);
 				signal_handler_t *sh = obs_source_get_signal_handler(playout->items.array[i].transition);
 				signal_handler_connect(sh, "transition_stop", playout_source_transition_stop, data);
-				signal_handler_connect(sh, "transition_video_stop", playout_source_transition_stop, data);
+				//signal_handler_connect(sh, "transition_video_stop", playout_source_transition_video_stop, data);
 
 				obs_data_release(transition_settings);
 			}
@@ -346,6 +337,28 @@ static void playout_source_video_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
 	struct playout_source_context *playout = data;
+	const audio_t *a = obs_get_audio();
+	const struct audio_output_info *aoi = audio_output_get_info(a);
+
+	pthread_mutex_lock(&playout->audio_mutex);
+	while (playout->audio_frames.size > 0) {
+		struct obs_source_audio audio;
+		audio.format = aoi->format;
+		audio.samples_per_sec = aoi->samples_per_sec;
+		audio.speakers = aoi->speakers;
+		circlebuf_pop_front(&playout->audio_frames, &audio.frames, sizeof(audio.frames));
+		circlebuf_pop_front(&playout->audio_timestamps, &audio.timestamp, sizeof(audio.timestamp));
+		for (size_t i = 0; i < playout->num_channels; i++) {
+			audio.data[i] = (uint8_t *)playout->audio_data[i].data + playout->audio_data[i].start_pos;
+		}
+		obs_source_output_audio(playout->source, &audio);
+		for (size_t i = 0; i < playout->num_channels; i++) {
+			circlebuf_pop_front(&playout->audio_data[i], NULL, audio.frames * sizeof(float));
+		}
+	}
+	playout->num_channels = audio_output_get_channels(a);
+	pthread_mutex_unlock(&playout->audio_mutex);
+
 	if (playout->switch_to_next) {
 		playout_source_switch_to_next_item(playout);
 		return;
@@ -620,7 +633,7 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 		for (struct os_dirent *ent = os_readdir(dir); ent != NULL; ent = os_readdir(dir)) {
 			if (ent->directory)
 				continue;
-			dstr_printf(&setting_name, "path%d", playout->items.num);
+			dstr_printf(&setting_name, "path%d", (int)playout->items.num);
 			struct dstr dir_path;
 			dstr_init_copy(&dir_path, obs_data_get_string(settings, "action_path"));
 			dstr_copy(&dir_path, action_path);
@@ -782,48 +795,6 @@ static void playout_source_video_render(void *data, gs_effect_t *effect)
 		obs_source_video_render(playout->current_source);
 }
 
-static bool playout_source_audio_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio_output, uint32_t mixers,
-					size_t channels, size_t sample_rate)
-{
-	UNUSED_PARAMETER(sample_rate);
-	struct playout_source_context *playout = data;
-
-	obs_source_t *source = obs_source_get_ref(playout->current_transition);
-	if (!source)
-		source = obs_source_get_ref(playout->current_source);
-	if (!source)
-		return false;
-
-	uint64_t timestamp = 0;
-
-	if (obs_source_audio_pending(source)) {
-		obs_source_release(source);
-		return false;
-	}
-	timestamp = obs_source_get_audio_timestamp(source);
-	if (!timestamp) {
-		obs_source_release(source);
-		return false;
-	}
-
-	struct obs_source_audio_mix child_audio;
-	obs_source_get_audio_mix(source, &child_audio);
-	obs_source_release(source);
-	for (size_t mix = 0; mix < MAX_AUDIO_MIXES; mix++) {
-		if ((mixers & (1 << mix)) == 0)
-			continue;
-
-		for (size_t ch = 0; ch < channels; ch++) {
-			float *out = audio_output->output[mix].data[ch];
-			float *in = child_audio.output[mix].data[ch];
-
-			memcpy(out, in, AUDIO_OUTPUT_FRAMES * sizeof(float));
-		}
-	}
-	*ts_out = timestamp;
-	return true;
-}
-
 static void playout_source_activate(void *data)
 {
 	struct playout_source_context *playout = data;
@@ -834,15 +805,26 @@ static void playout_source_activate(void *data)
 	if (playout->current_index < 0 || playout->current_index >= (int)playout->items.num) {
 		playout->current_index = 0;
 		if (playout->current_source) {
+			obs_source_remove_active_child(playout->source, playout->current_source);
 			obs_source_release(playout->current_source);
 			obs_source_dec_showing(playout->current_source);
 		}
+		if (playout->current_transition) {
+			obs_source_remove_active_child(playout->source, playout->current_transition);
+			obs_source_dec_showing(playout->current_transition);
+			obs_source_release(playout->current_transition);
+			playout->current_transition = NULL;
+		}
 		playout->current_source = obs_source_get_ref(playout->items.array[playout->current_index].source);
-		if (playout->current_source)
+		if (playout->current_source) {
+			obs_source_remove_active_child(playout->source, playout->current_source);
 			obs_source_inc_showing(playout->current_source);
+		}
 		if (playout->items.array[playout->current_index].transition) {
 			obs_transition_set(playout->items.array[playout->current_index].transition, playout->current_source);
 			playout->current_transition = obs_source_get_ref(playout->items.array[playout->current_index].transition);
+			obs_source_inc_showing(playout->current_transition);
+			obs_source_add_active_child(playout->source, playout->current_transition);
 			playout->current_transition_duration = playout->items.array[playout->current_index].transition_duration_ms;
 		}
 	}
@@ -962,10 +944,20 @@ static void playout_source_frontend_event(enum obs_frontend_event event, void *d
 	}
 }
 
+static void playout_source_enum_active_sources(void *data, obs_source_enum_proc_t enum_callback, void *param)
+{
+	struct playout_source_context *playout = data;
+	if (playout->current_source)
+		enum_callback(playout->source, playout->current_source, param);
+	if (playout->current_transition)
+		enum_callback(playout->source, playout->current_transition, param);
+	enum_callback(playout->source, playout->audio_wrapper, param);
+}
+
 struct obs_source_info playout_source = {
 	.id = "playout_source",
 	.type = OBS_SOURCE_TYPE_INPUT,
-	.output_flags = OBS_OUTPUT_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_COMPOSITE | OBS_SOURCE_DO_NOT_DUPLICATE |
+	.output_flags = OBS_OUTPUT_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_AUDIO | OBS_SOURCE_DO_NOT_DUPLICATE |
 			OBS_SOURCE_CONTROLLABLE_MEDIA,
 	.icon_type = OBS_ICON_TYPE_MEDIA,
 	.get_name = playout_source_get_name,
@@ -978,7 +970,6 @@ struct obs_source_info playout_source = {
 	.get_width = playout_source_get_width,
 	.get_height = playout_source_get_height,
 	.video_render = playout_source_video_render,
-	.audio_render = playout_source_audio_render,
 	.media_play_pause = playout_source_play_pause,
 	.media_restart = playout_source_restart,
 	.media_stop = playout_source_stop,
@@ -989,6 +980,7 @@ struct obs_source_info playout_source = {
 	.media_get_time = playout_source_get_time,
 	.media_set_time = playout_source_set_time,
 	.activate = playout_source_activate,
+	.enum_active_sources = playout_source_enum_active_sources,
 };
 
 OBS_DECLARE_MODULE()
@@ -1008,6 +1000,7 @@ bool obs_module_load(void)
 {
 	blog(LOG_INFO, "[Playout Source] loaded version %s", PROJECT_VERSION);
 	obs_register_source(&playout_source);
+	obs_register_source(&audio_wrapper_source);
 	return true;
 }
 
