@@ -4,6 +4,7 @@
 #include <obs-module.h>
 #include <stdio.h>
 #include <util/dstr.h>
+#include <util/platform.h>
 
 struct playout_source_item {
 	obs_source_t *source;
@@ -43,6 +44,12 @@ struct playout_source_context {
 #define PLAYOUT_ACTION_REMOVE_ALL 4
 #define PLAYOUT_ACTION_MOVE_SELECTED_UP 5
 #define PLAYOUT_ACTION_MOVE_SELECTED_DOWN 6
+#define PLAYOUT_ACTION_ADD_FOLDER 7
+#define PLAYOUT_ACTION_TRANSITION_SELECTED 8
+#define PLAYOUT_ACTION_SECTION_SELECTED 9
+#define PLAYOUT_ACTION_SELECT_ALL 10
+#define PLAYOUT_ACTION_SELECT_NONE 11
+#define PLAYOUT_ACTION_SELECTION_INVERT 12
 
 #define PLUGIN_INFO                                                                                      \
 	"<a href=\"https://github.com/exeldro/obs-playout-source\">Playout Source</a> (" PROJECT_VERSION \
@@ -566,6 +573,8 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 			obs_data_unset_user_value(settings, setting_name.array);
 			dstr_printf(&setting_name, "transition%d", i);
 			obs_data_unset_user_value(settings, setting_name.array);
+			dstr_printf(&setting_name, "item%d", i);
+			obs_properties_remove_by_name(props, setting_name.array);
 		}
 		selected = 0;
 		for (int i = 0; i < (int)playout->items.num; i++) {
@@ -604,11 +613,85 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 				playout_source_switch_item_settings(settings, i, i + 1, &setting_name);
 			}
 		}
+	} else if (action == PLAYOUT_ACTION_ADD_FOLDER) {
+		const char *action_path = obs_data_get_string(settings, "action_path");
+		os_dir_t *dir = os_opendir(action_path);
+		obs_properties_remove_by_name(props, "plugin_info");
+		for (struct os_dirent *ent = os_readdir(dir); ent != NULL; ent = os_readdir(dir)) {
+			if (ent->directory)
+				continue;
+			dstr_printf(&setting_name, "path%d", playout->items.num);
+			struct dstr dir_path;
+			dstr_init_copy(&dir_path, obs_data_get_string(settings, "action_path"));
+			dstr_copy(&dir_path, action_path);
+			dstr_cat_ch(&dir_path, '/');
+			dstr_cat(&dir_path, ent->d_name);
+			obs_data_set_string(settings, setting_name.array, dir_path.array);
+			dstr_free(&dir_path);
+			add_item_properties(playout, props, &setting_name, (int)playout->items.num);
+			da_push_back_new(playout->items);
+		}
+		obs_properties_add_text(props, "plugin_info", PLUGIN_INFO, OBS_TEXT_INFO);
+	} else if (action == PLAYOUT_ACTION_TRANSITION_SELECTED) {
+		for (int i = 0; i < (int)playout->items.num; i++) {
+			dstr_printf(&setting_name, "selected%d", i);
+			if (obs_data_get_bool(settings, setting_name.array)) {
+				dstr_printf(&setting_name, "transition%d", i);
+				obs_data_set_string(settings, setting_name.array,
+						    obs_data_get_string(settings, "action_transition"));
+			}
+		}
+	} else if (action == PLAYOUT_ACTION_SECTION_SELECTED) {
+		for (int i = 0; i < (int)playout->items.num; i++) {
+			dstr_printf(&setting_name, "selected%d", i);
+			if (obs_data_get_bool(settings, setting_name.array)) {
+				dstr_printf(&setting_name, "section%d", i);
+				obs_data_set_string(settings, setting_name.array, obs_data_get_string(settings, "action_section"));
+			}
+		}
+	} else if (action == PLAYOUT_ACTION_SELECT_ALL) {
+		for (int i = 0; i < (int)playout->items.num; i++) {
+			dstr_printf(&setting_name, "selected%d", i);
+			obs_data_set_bool(settings, setting_name.array, true);
+		}
+	} else if (action == PLAYOUT_ACTION_SELECT_NONE) {
+		for (int i = 0; i < (int)playout->items.num; i++) {
+			dstr_printf(&setting_name, "selected%d", i);
+			obs_data_set_bool(settings, setting_name.array, false);
+		}
+	} else if (action == PLAYOUT_ACTION_SELECTION_INVERT) {
+		for (int i = 0; i < (int)playout->items.num; i++) {
+			dstr_printf(&setting_name, "selected%d", i);
+			obs_data_set_bool(settings, setting_name.array, !obs_data_get_bool(settings, setting_name.array));
+		}
 	}
 	dstr_free(&setting_name);
 	obs_data_unset_user_value(settings, "action");
 	obs_data_release(settings);
 	return true;
+}
+
+static bool playout_source_action_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	bool changed = false;
+	long long action = obs_data_get_int(settings, "action");
+	obs_property_t *path = obs_properties_get(props, "action_path");
+	if (obs_property_visible(path) != (action == PLAYOUT_ACTION_ADD_FOLDER)) {
+		obs_property_set_visible(path, !obs_property_visible(path));
+		changed = true;
+	}
+	obs_property_t *section = obs_properties_get(props, "action_section");
+	if (obs_property_visible(section) != (action == PLAYOUT_ACTION_SECTION_SELECTED)) {
+		obs_property_set_visible(section, !obs_property_visible(section));
+		changed = true;
+	}
+	obs_property_t *transition = obs_properties_get(props, "action_transition");
+	if (obs_property_visible(transition) != (action == PLAYOUT_ACTION_TRANSITION_SELECTED)) {
+		obs_property_set_visible(transition, !obs_property_visible(transition));
+		changed = true;
+	}
+	return changed;
 }
 
 static obs_properties_t *playout_source_properties(void *data)
@@ -631,6 +714,25 @@ static obs_properties_t *playout_source_properties(void *data)
 	obs_property_list_add_int(p, obs_module_text("RemoveAll"), PLAYOUT_ACTION_REMOVE_ALL);
 	obs_property_list_add_int(p, obs_module_text("MoveSelectedUp"), PLAYOUT_ACTION_MOVE_SELECTED_UP);
 	obs_property_list_add_int(p, obs_module_text("MoveSelectedDown"), PLAYOUT_ACTION_MOVE_SELECTED_DOWN);
+	obs_property_list_add_int(p, obs_module_text("AddFolder"), PLAYOUT_ACTION_ADD_FOLDER);
+	obs_property_list_add_int(p, obs_module_text("SetTransitionSelected"), PLAYOUT_ACTION_TRANSITION_SELECTED);
+	obs_property_list_add_int(p, obs_module_text("SetSectionSelected"), PLAYOUT_ACTION_SECTION_SELECTED);
+	obs_property_list_add_int(p, obs_module_text("SelectAll"), PLAYOUT_ACTION_SELECT_ALL);
+	obs_property_list_add_int(p, obs_module_text("SelectNone"), PLAYOUT_ACTION_SELECT_NONE);
+	obs_property_list_add_int(p, obs_module_text("InvertSelection"), PLAYOUT_ACTION_SELECTION_INVERT);
+	obs_property_set_modified_callback(p, playout_source_action_changed);
+	obs_properties_add_path(props, "action_path", obs_module_text("Directory"), OBS_PATH_DIRECTORY, NULL, NULL);
+	obs_properties_add_text(props, "action_section", obs_module_text("Section"), OBS_TEXT_DEFAULT);
+	p = obs_properties_add_list(props, "action_transition", obs_module_text("Transition"), OBS_COMBO_TYPE_LIST,
+				    OBS_COMBO_FORMAT_STRING);
+	obs_property_list_add_string(p, obs_module_text("None"), "");
+	size_t idx = 0;
+	const char *id;
+	while (obs_enum_transition_types(idx++, &id)) {
+		const char *name = obs_source_get_display_name(id);
+		obs_property_list_add_string(p, name, id);
+	}
+
 	obs_properties_add_button2(props, "action_go", obs_module_text("ExecuteAction"), playout_source_action, data);
 
 	if (playout) {
