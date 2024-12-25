@@ -19,10 +19,11 @@
 #define PLAYOUT_ACTION_MOVE_SELECTED_DOWN 6
 #define PLAYOUT_ACTION_ADD_FOLDER 7
 #define PLAYOUT_ACTION_TRANSITION_SELECTED 8
-#define PLAYOUT_ACTION_SECTION_SELECTED 9
-#define PLAYOUT_ACTION_SELECT_ALL 10
-#define PLAYOUT_ACTION_SELECT_NONE 11
-#define PLAYOUT_ACTION_SELECTION_INVERT 12
+#define PLAYOUT_ACTION_TRANSITION_DURATION_SELECTED 9
+#define PLAYOUT_ACTION_SECTION_SELECTED 10
+#define PLAYOUT_ACTION_SELECT_ALL 11
+#define PLAYOUT_ACTION_SELECT_NONE 12
+#define PLAYOUT_ACTION_SELECTION_INVERT 13
 
 #define PLUGIN_INFO                                                                                      \
 	"<a href=\"https://github.com/exeldro/obs-playout-source\">Playout Source</a> (" PROJECT_VERSION \
@@ -516,6 +517,34 @@ static void playout_source_switch_item_settings(obs_data_t *settings, size_t i, 
 	playout_source_switch_int(settings, i, j, setting_name, "transition_duration%d");
 }
 
+static bool playout_source_action_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
+{
+	UNUSED_PARAMETER(property);
+	bool changed = false;
+	long long action = obs_data_get_int(settings, "action");
+	obs_property_t *path = obs_properties_get(props, "action_path");
+	if (obs_property_visible(path) != (action == PLAYOUT_ACTION_ADD_FOLDER)) {
+		obs_property_set_visible(path, !obs_property_visible(path));
+		changed = true;
+	}
+	obs_property_t *section = obs_properties_get(props, "action_section");
+	if (obs_property_visible(section) != (action == PLAYOUT_ACTION_SECTION_SELECTED)) {
+		obs_property_set_visible(section, !obs_property_visible(section));
+		changed = true;
+	}
+	obs_property_t *transition = obs_properties_get(props, "action_transition");
+	if (obs_property_visible(transition) != (action == PLAYOUT_ACTION_TRANSITION_SELECTED)) {
+		obs_property_set_visible(transition, !obs_property_visible(transition));
+		changed = true;
+	}
+	obs_property_t *transition_duration = obs_properties_get(props, "action_transition_duration");
+	if (obs_property_visible(transition_duration) != (action == PLAYOUT_ACTION_TRANSITION_DURATION_SELECTED)) {
+		obs_property_set_visible(transition_duration, !obs_property_visible(transition_duration));
+		changed = true;
+	}
+	return changed;
+}
+
 static bool playout_source_action(obs_properties_t *props, obs_property_t *property, void *data)
 {
 	UNUSED_PARAMETER(property);
@@ -577,6 +606,8 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 		}
 	} else if (action == PLAYOUT_ACTION_REMOVE_ALL) {
 		for (int i = 0; i < (int)playout->items.num; i++) {
+			dstr_printf(&setting_name, "item%d", i);
+			obs_properties_remove_by_name(props, setting_name.array);
 			dstr_printf(&setting_name, "path%d", i);
 			obs_data_unset_user_value(settings, setting_name.array);
 			dstr_printf(&setting_name, "transition%d", i);
@@ -629,6 +660,15 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 						    obs_data_get_string(settings, "action_transition"));
 			}
 		}
+	} else if (action == PLAYOUT_ACTION_TRANSITION_DURATION_SELECTED) {
+		for (int i = 0; i < (int)playout->items.num; i++) {
+			dstr_printf(&setting_name, "selected%d", i);
+			if (obs_data_get_bool(settings, setting_name.array)) {
+				dstr_printf(&setting_name, "transition_duration%d", i);
+				obs_data_set_int(settings, setting_name.array,
+						    obs_data_get_int(settings, "action_transition_duration"));
+			}
+		}
 	} else if (action == PLAYOUT_ACTION_SECTION_SELECTED) {
 		for (int i = 0; i < (int)playout->items.num; i++) {
 			dstr_printf(&setting_name, "selected%d", i);
@@ -655,31 +695,9 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 	}
 	dstr_free(&setting_name);
 	obs_data_unset_user_value(settings, "action");
+	playout_source_action_changed(props, property, settings);
 	obs_data_release(settings);
 	return true;
-}
-
-static bool playout_source_action_changed(obs_properties_t *props, obs_property_t *property, obs_data_t *settings)
-{
-	UNUSED_PARAMETER(property);
-	bool changed = false;
-	long long action = obs_data_get_int(settings, "action");
-	obs_property_t *path = obs_properties_get(props, "action_path");
-	if (obs_property_visible(path) != (action == PLAYOUT_ACTION_ADD_FOLDER)) {
-		obs_property_set_visible(path, !obs_property_visible(path));
-		changed = true;
-	}
-	obs_property_t *section = obs_properties_get(props, "action_section");
-	if (obs_property_visible(section) != (action == PLAYOUT_ACTION_SECTION_SELECTED)) {
-		obs_property_set_visible(section, !obs_property_visible(section));
-		changed = true;
-	}
-	obs_property_t *transition = obs_properties_get(props, "action_transition");
-	if (obs_property_visible(transition) != (action == PLAYOUT_ACTION_TRANSITION_SELECTED)) {
-		obs_property_set_visible(transition, !obs_property_visible(transition));
-		changed = true;
-	}
-	return changed;
 }
 
 static obs_properties_t *playout_source_properties(void *data)
@@ -704,6 +722,7 @@ static obs_properties_t *playout_source_properties(void *data)
 	obs_property_list_add_int(p, obs_module_text("MoveSelectedDown"), PLAYOUT_ACTION_MOVE_SELECTED_DOWN);
 	obs_property_list_add_int(p, obs_module_text("AddFolder"), PLAYOUT_ACTION_ADD_FOLDER);
 	obs_property_list_add_int(p, obs_module_text("SetTransitionSelected"), PLAYOUT_ACTION_TRANSITION_SELECTED);
+	obs_property_list_add_int(p, obs_module_text("SetTransitionDurationSelected"), PLAYOUT_ACTION_TRANSITION_DURATION_SELECTED);
 	obs_property_list_add_int(p, obs_module_text("SetSectionSelected"), PLAYOUT_ACTION_SECTION_SELECTED);
 	obs_property_list_add_int(p, obs_module_text("SelectAll"), PLAYOUT_ACTION_SELECT_ALL);
 	obs_property_list_add_int(p, obs_module_text("SelectNone"), PLAYOUT_ACTION_SELECT_NONE);
@@ -720,6 +739,8 @@ static obs_properties_t *playout_source_properties(void *data)
 		const char *name = obs_source_get_display_name(id);
 		obs_property_list_add_string(p, name, id);
 	}
+	p = obs_properties_add_int(props, "action_transition_duration", obs_module_text("TransitionDuration"), 50, 20000, 1000);
+	obs_property_int_set_suffix(p, " ms");
 
 	obs_properties_add_button2(props, "action_go", obs_module_text("ExecuteAction"), playout_source_action, data);
 
