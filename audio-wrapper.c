@@ -24,11 +24,11 @@ void audio_wrapper_destroy(void *data)
 	bfree(data);
 }
 
-bool audio_wrapper_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio, uint32_t mixers, size_t channels,
+bool audio_wrapper_render(void *data, uint64_t *ts_out, struct obs_source_audio_mix *audio_mix, uint32_t mixers, size_t channels,
 			  size_t sample_rate)
 {
 	UNUSED_PARAMETER(ts_out);
-	UNUSED_PARAMETER(audio);
+	UNUSED_PARAMETER(audio_mix);
 	UNUSED_PARAMETER(mixers);
 	UNUSED_PARAMETER(sample_rate);
 	struct audio_wrapper_info *aw = (struct audio_wrapper_info *)data;
@@ -48,14 +48,18 @@ bool audio_wrapper_render(void *data, uint64_t *ts_out, struct obs_source_audio_
 	for (size_t mix = 0; mix < MAX_AUDIO_MIXES; mix++) {
 		if ((mixers & (1 << mix)) == 0)
 			continue;
-		pthread_mutex_lock(&aw->playout->audio_mutex);
-		uint32_t frames = AUDIO_OUTPUT_FRAMES;
-		for (size_t j = 0; j < channels; j++) {
-			circlebuf_push_back(&aw->playout->audio_data[j], child_audio.output[mix].data[j], frames * sizeof(float));
+		const audio_t *a = obs_get_audio();
+		const struct audio_output_info *aoi = audio_output_get_info(a);
+		struct obs_source_audio audio;
+		audio.format = aoi->format;
+		audio.samples_per_sec = aoi->samples_per_sec;
+		audio.speakers = aoi->speakers;
+		audio.frames = AUDIO_OUTPUT_FRAMES;
+		audio.timestamp = timestamp;
+		for (size_t i = 0; i < channels; i++) {
+			audio.data[i] = (uint8_t *)child_audio.output[mix].data[i];
 		}
-		circlebuf_push_back(&aw->playout->audio_frames, &frames, sizeof(frames));
-		circlebuf_push_back(&aw->playout->audio_timestamps, &timestamp, sizeof(timestamp));
-		pthread_mutex_unlock(&aw->playout->audio_mutex);
+		obs_source_output_audio(aw->playout->source, &audio);
 		break;
 	}
 	obs_source_release(source);

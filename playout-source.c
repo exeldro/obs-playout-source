@@ -42,8 +42,6 @@ static void *playout_source_create(obs_data_t *settings, obs_source_t *source)
 	struct playout_source_context *playout = bzalloc(sizeof(struct playout_source_context));
 	playout->source = source;
 	playout->current_index = -1;
-	pthread_mutex_init(&playout->audio_mutex, NULL);
-
 	playout->audio_wrapper = obs_source_create_private(audio_wrapper_source.id, audio_wrapper_source.id, NULL);
 	struct audio_wrapper_info *aw = obs_obj_get_data(playout->audio_wrapper);
 	aw->playout = playout;
@@ -77,7 +75,6 @@ static void playout_source_destroy(void *data)
 		obs_source_release(playout->items.array[i].transition);
 	}
 	da_free(playout->items);
-	pthread_mutex_destroy(&playout->audio_mutex);
 	bfree(data);
 }
 
@@ -337,28 +334,6 @@ static void playout_source_video_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
 	struct playout_source_context *playout = data;
-	const audio_t *a = obs_get_audio();
-	const struct audio_output_info *aoi = audio_output_get_info(a);
-
-	pthread_mutex_lock(&playout->audio_mutex);
-	while (playout->audio_frames.size > 0) {
-		struct obs_source_audio audio;
-		audio.format = aoi->format;
-		audio.samples_per_sec = aoi->samples_per_sec;
-		audio.speakers = aoi->speakers;
-		circlebuf_pop_front(&playout->audio_frames, &audio.frames, sizeof(audio.frames));
-		circlebuf_pop_front(&playout->audio_timestamps, &audio.timestamp, sizeof(audio.timestamp));
-		for (size_t i = 0; i < playout->num_channels; i++) {
-			audio.data[i] = (uint8_t *)playout->audio_data[i].data + playout->audio_data[i].start_pos;
-		}
-		obs_source_output_audio(playout->source, &audio);
-		for (size_t i = 0; i < playout->num_channels; i++) {
-			circlebuf_pop_front(&playout->audio_data[i], NULL, audio.frames * sizeof(float));
-		}
-	}
-	playout->num_channels = audio_output_get_channels(a);
-	pthread_mutex_unlock(&playout->audio_mutex);
-
 	if (playout->switch_to_next) {
 		playout_source_switch_to_next_item(playout);
 		return;
