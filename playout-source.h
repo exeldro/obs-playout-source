@@ -11,6 +11,8 @@ struct playout_source_item {
 	obs_source_t *transition;
 	uint32_t transition_duration_ms;
 	uint32_t speed;
+	bool seek_start;
+	int64_t last_time;
 };
 
 struct playout_source_context {
@@ -19,6 +21,7 @@ struct playout_source_context {
 	obs_source_t *current_transition;
 	uint32_t current_transition_duration;
 	bool playing;
+	bool active;
 	bool auto_play;
 	bool loop;
 	bool next_after_transition;

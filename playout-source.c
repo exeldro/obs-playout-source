@@ -35,8 +35,6 @@ static const char *playout_source_get_name(void *type_data)
 	return obs_module_text("Playout");
 }
 
-static void playout_source_frontend_event(enum obs_frontend_event event, void *data);
-
 static void *playout_source_create(obs_data_t *settings, obs_source_t *source)
 {
 	UNUSED_PARAMETER(settings);
@@ -47,7 +45,6 @@ static void *playout_source_create(obs_data_t *settings, obs_source_t *source)
 	struct audio_wrapper_info *aw = obs_obj_get_data(playout->audio_wrapper);
 	aw->playout = playout;
 	obs_source_update(source, settings);
-	obs_frontend_add_event_callback(playout_source_frontend_event, playout);
 	return playout;
 }
 
@@ -58,7 +55,6 @@ static void playout_source_destroy(void *data)
 		obs_source_release(playout->audio_wrapper);
 		playout->audio_wrapper = NULL;
 	}
-	obs_frontend_remove_event_callback(playout_source_frontend_event, playout);
 	if (playout->current_source) {
 		obs_source_remove_active_child(playout->source, playout->current_source);
 		obs_source_dec_showing(playout->current_source);
@@ -77,6 +73,64 @@ static void playout_source_destroy(void *data)
 	}
 	da_free(playout->items);
 	bfree(data);
+}
+
+static void playout_source_activate(void *data)
+{
+	struct playout_source_context *playout = data;
+	if (!playout->auto_play)
+		return;
+	if (!playout->items.num)
+		return;
+	if (playout->current_index < 0 || playout->current_index >= (int)playout->items.num) {
+		playout->current_index = 0;
+		if (playout->current_source) {
+			obs_source_remove_active_child(playout->source, playout->current_source);
+			obs_source_dec_showing(playout->current_source);
+			obs_source_release(playout->current_source);
+		}
+		if (playout->current_transition) {
+			obs_source_remove_active_child(playout->source, playout->current_transition);
+			obs_source_dec_showing(playout->current_transition);
+			obs_source_release(playout->current_transition);
+			playout->current_transition = NULL;
+		}
+		playout->current_source = obs_source_get_ref(playout->items.array[playout->current_index].source);
+		if (playout->current_source) {
+			obs_source_inc_showing(playout->current_source);
+			obs_source_add_active_child(playout->source, playout->current_source);
+		}
+		if (playout->items.array[playout->current_index].transition) {
+			obs_transition_set(playout->items.array[playout->current_index].transition, playout->current_source);
+			playout->current_transition = obs_source_get_ref(playout->items.array[playout->current_index].transition);
+			obs_source_inc_showing(playout->current_transition);
+			obs_source_add_active_child(playout->source, playout->current_transition);
+			playout->current_transition_duration = playout->items.array[playout->current_index].transition_duration_ms;
+		}
+	}
+	if (playout->current_source) {
+		enum obs_media_state state = obs_source_media_get_state(playout->current_source);
+		if (state == OBS_MEDIA_STATE_NONE) {
+		} else if (state == OBS_MEDIA_STATE_PAUSED) {
+			if (obs_source_media_get_time(playout->current_source) >=
+			    (int64_t)playout->items.array[playout->current_index].start) {
+				obs_source_media_play_pause(playout->current_source, false);
+			}
+		} else if (state == OBS_MEDIA_STATE_PLAYING) {
+			if (!playout->items.array[playout->current_index].seek_start) {
+				if (obs_source_media_get_time(playout->current_source) >=
+				    (int64_t)playout->items.array[playout->current_index].start) {
+					obs_source_media_set_time(playout->current_source,
+								  playout->items.array[playout->current_index].start);
+					playout->items.array[playout->current_index].seek_start = true;
+				}
+			}
+		} else {
+			obs_source_media_restart(playout->current_source);
+		}
+	}
+	playout->playing = true;
+	playout->active = true;
 }
 
 void playout_source_update_current_source(struct playout_source_context *playout, bool use_transition)
@@ -104,27 +158,35 @@ void playout_source_update_current_source(struct playout_source_context *playout
 		obs_source_remove_active_child(playout->source, playout->current_source);
 		obs_source_dec_showing(playout->current_source);
 		obs_source_release(playout->current_source);
+		obs_source_media_play_pause(playout->current_source, true);
+		for (size_t i = 0; i < playout->items.num; i++) {
+			if (playout->items.array[i].source == playout->current_source) {
+				enum obs_media_state state = obs_source_media_get_state(playout->current_source);
+				if (state == OBS_MEDIA_STATE_ENDED) {
+					obs_source_media_restart(playout->current_source);
+				} else {
+					obs_source_media_set_time(playout->current_source, playout->items.array[i].start);
+					playout->items.array[i].seek_start = true;
+					obs_source_media_play_pause(playout->current_source, false);
+				}
+			}
+		}
 	}
 	playout->current_source = obs_source_get_ref(playout->items.array[playout->current_index].source);
 	if (!playout->current_transition && playout->items.array[playout->current_index].transition) {
 		obs_transition_set(playout->items.array[playout->current_index].transition, playout->current_source);
 		playout->current_transition = obs_source_get_ref(playout->items.array[playout->current_index].transition);
-		obs_source_add_active_child(playout->source, playout->current_transition);
 		obs_source_inc_showing(playout->current_transition);
+		obs_source_add_active_child(playout->source, playout->current_transition);
 		playout->current_transition_duration = playout->items.array[playout->current_index].transition_duration_ms;
 	}
+
 	if (playout->current_source) {
-		obs_source_add_active_child(playout->source, playout->current_source);
 		obs_source_inc_showing(playout->current_source);
-		if (use_transition) {
-			enum obs_media_state state = obs_source_media_get_state(playout->current_source);
-			if (state == OBS_MEDIA_STATE_ENDED) {
-				obs_source_media_restart(playout->current_source);
-			}
-			obs_source_media_set_time(playout->current_source, playout->items.array[playout->current_index].start);
-			obs_source_media_play_pause(playout->current_source, false);
-		}
+		obs_source_add_active_child(playout->source, playout->current_source);
 	}
+	if (playout->active)
+		playout_source_activate(playout);
 }
 
 void playout_source_switch_to_next_item(struct playout_source_context *playout)
@@ -168,7 +230,11 @@ void playout_source_switch_to_next_item(struct playout_source_context *playout)
 			switch_scene = true;
 		}
 	} else if (playout->playback_mode == PLAYBACK_MODE_SINGLE) {
-		if (!playout->loop && playout->auto_play && obs_frontend_preview_program_mode_active()) {
+		if (playout->loop) {
+			obs_source_media_set_time(playout->current_source, playout->items.array[playout->current_index].start);
+			playout->items.array[playout->current_index].seek_start = true;
+			obs_source_media_play_pause(playout->current_source, false);
+		} else if (playout->auto_play && obs_frontend_preview_program_mode_active()) {
 			switch_scene = true;
 		}
 	}
@@ -178,6 +244,37 @@ void playout_source_switch_to_next_item(struct playout_source_context *playout)
 	playout_source_update_current_source(playout, true);
 }
 
+static bool playout_source_use_global_transition(struct playout_source_context *playout)
+{
+	if (!playout->auto_play)
+		return false;
+	if (!obs_frontend_preview_program_mode_active())
+		return false;
+	return true;
+}
+
+static bool playout_source_last(struct playout_source_context *playout)
+{
+	if (playout->loop)
+		return false;
+	if (playout->playback_mode == PLAYBACK_MODE_LIST) {
+		return playout->current_index == (int)playout->items.num - 1;
+	} else if (playout->playback_mode == PLAYBACK_MODE_SECTION) {
+		return playout->current_index >= (int)playout->items.num - 1 ||
+		       (playout->items.array[playout->current_index].section &&
+			playout->items.array[playout->current_index + 1].section &&
+			strcmp(playout->items.array[playout->current_index].section,
+			       playout->items.array[playout->current_index + 1].section) != 0) ||
+		       (!playout->items.array[playout->current_index].section &&
+			playout->items.array[playout->current_index + 1].section) ||
+		       (playout->items.array[playout->current_index].section &&
+			!playout->items.array[playout->current_index + 1].section);
+	} else if (playout->playback_mode == PLAYBACK_MODE_SINGLE) {
+		return true;
+	}
+	return false;
+}
+
 static void playout_source_media_ended(void *data, calldata_t *cd)
 {
 	struct playout_source_context *playout = data;
@@ -185,31 +282,30 @@ static void playout_source_media_ended(void *data, calldata_t *cd)
 	if (playout->current_source != source)
 		return;
 
-	bool last = false;
-	if (playout->auto_play && !playout->loop && obs_frontend_preview_program_mode_active()) {
-		if (playout->playback_mode == PLAYBACK_MODE_LIST) {
-			last = playout->current_index == (int)playout->items.num - 1;
-		} else if (playout->playback_mode == PLAYBACK_MODE_SECTION) {
-			last = playout->current_index >= (int)playout->items.num - 1 ||
-			       (playout->items.array[playout->current_index].section &&
-				playout->items.array[playout->current_index + 1].section &&
-				strcmp(playout->items.array[playout->current_index].section,
-				       playout->items.array[playout->current_index + 1].section) != 0) ||
-			       (!playout->items.array[playout->current_index].section &&
-				playout->items.array[playout->current_index + 1].section) ||
-			       (playout->items.array[playout->current_index].section &&
-				!playout->items.array[playout->current_index + 1].section);
-		} else if (playout->playback_mode == PLAYBACK_MODE_SINGLE) {
-			last = true;
-		}
-	}
-	if (last) {
-		if (!playout->next_after_transition && obs_source_active(playout->source)) {
+	if (playout_source_last(playout)) {
+		if (playout_source_use_global_transition(playout) && !playout->next_after_transition &&
+		    obs_source_active(playout->source)) {
 			playout->next_after_transition = true;
 			obs_frontend_preview_program_trigger_transition();
 		}
 	} else {
 		playout->switch_to_next = true;
+	}
+}
+
+static void playout_source_media_started(void *data, calldata_t *cd)
+{
+	struct playout_source_context *playout = data;
+	obs_source_t *source = calldata_ptr(cd, "source");
+
+	for (size_t i = 0; i < playout->items.num; i++) {
+		if (playout->items.array[i].source != source)
+			continue;
+		if (obs_source_media_get_time(source) < (int64_t)playout->items.array[i].start) {
+			obs_source_media_set_time(source, playout->items.array[i].start);			
+		}
+		playout->items.array[i].seek_start = true;
+		break;
 	}
 }
 
@@ -219,7 +315,15 @@ void playout_source_transition_stop(void *data, calldata_t *cd)
 	struct playout_source_context *playout = data;
 	if (playout->current_index < 0 || playout->current_index >= (int)playout->items.num)
 		return;
-	if (playout->items.array[playout->current_index].transition) {
+	if (playout_source_last(playout)) {
+		if (playout->current_transition) {
+			obs_source_remove_active_child(playout->source, playout->current_transition);
+			obs_source_dec_showing(playout->current_transition);
+			obs_source_release(playout->current_transition);
+			playout->current_transition = NULL;
+			playout->current_transition_duration = 0;
+		}
+	} else if (playout->items.array[playout->current_index].transition) {
 		if (playout->current_transition == playout->items.array[playout->current_index].transition)
 			return;
 		if (playout->current_transition) {
@@ -235,6 +339,7 @@ void playout_source_transition_stop(void *data, calldata_t *cd)
 			obs_transition_set(newTransition, playout->current_source);
 			playout->current_transition = obs_source_get_ref(newTransition);
 			obs_source_inc_showing(playout->current_transition);
+			obs_source_add_active_child(playout->source, playout->current_transition);
 			playout->current_transition_duration = playout->items.array[playout->current_index].transition_duration_ms;
 		}
 	} else if (playout->current_transition) {
@@ -271,17 +376,24 @@ static void playout_source_update(void *data, obs_data_t *settings)
 			}
 			obs_data_release(s);
 		}
+
+		dstr_printf(&setting_name, "start%d", i);
+		playout->items.array[i].start = (uint64_t)(obs_data_get_double(settings, setting_name.array) * 1000.0);
+		dstr_printf(&setting_name, "end%d", i);
+		playout->items.array[i].end = (uint64_t)(obs_data_get_double(settings, setting_name.array) * -1000.0);
+
 		if (!playout->items.array[i].source) {
 			dstr_printf(&setting_name, "%s (%d)", obs_source_get_name(playout->source), i + 1);
 			playout->items.array[i].source = obs_source_create_private("ffmpeg_source", setting_name.array, NULL);
 			signal_handler_t *sh = obs_source_get_signal_handler(playout->items.array[i].source);
 			signal_handler_connect(sh, "media_ended", playout_source_media_ended, data);
+			signal_handler_connect(sh, "media_started", playout_source_media_started, data);
 		}
 		obs_data_t *ss = obs_data_create();
 		obs_data_set_bool(ss, "is_local_file", true);
 		obs_data_set_string(ss, "local_file", path);
-		obs_data_set_bool(ss, "looping", playout->loop && playout->playback_mode == PLAYBACK_MODE_SINGLE);
-		obs_data_set_bool(ss, "is_stinger", true);
+		obs_data_set_bool(ss, "looping", false);
+		obs_data_set_bool(ss, "is_stinger", false);
 		obs_data_set_bool(ss, "hw_decode", true);
 		obs_data_set_bool(ss, "close_when_inactive", false);
 		obs_data_set_bool(ss, "clear_on_media_end", false);
@@ -293,10 +405,6 @@ static void playout_source_update(void *data, obs_data_t *settings)
 		if (!playout->items.array[i].speed)
 			playout->items.array[i].speed = 100;
 		obs_data_set_int(ss, "speed_percent", playout->items.array[i].speed);
-		dstr_printf(&setting_name, "start%d", i);
-		playout->items.array[i].start = (uint64_t)(obs_data_get_double(settings, setting_name.array) * 1000.0);
-		dstr_printf(&setting_name, "end%d", i);
-		playout->items.array[i].end = (uint64_t)(obs_data_get_double(settings, setting_name.array) * -1000.0);
 		obs_source_update(playout->items.array[i].source, ss);
 		obs_data_release(ss);
 		dstr_printf(&setting_name, "transition%d", i);
@@ -331,13 +439,74 @@ static void playout_source_update(void *data, obs_data_t *settings)
 	dstr_free(&setting_name);
 }
 
+static void playout_source_in_active_tree(obs_source_t *parent, obs_source_t *child, void *data)
+{
+	UNUSED_PARAMETER(parent);
+	struct playout_source_context *playout = data;
+	if (playout->source == child) {
+		playout->active = true;
+	}
+}
+
+static void playout_source_deactivate(void *data)
+{
+	struct playout_source_context *playout = data;
+	if (playout->next_after_transition) {
+		if (playout->current_index >= (int)playout->items.num - 1) {
+			playout->current_index = 0;
+		} else {
+			playout->current_index++;
+		}
+		playout_source_update_current_source(playout, false);
+		playout->next_after_transition = false;
+	}
+	playout->active = false;
+}
+
 static void playout_source_video_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
 	struct playout_source_context *playout = data;
+	for (size_t i = 0; i < playout->items.num; i++) {
+		if (!playout->items.array[i].seek_start)
+			continue;
+		enum obs_media_state state = obs_source_media_get_state(playout->items.array[i].source);
+		if (state == OBS_MEDIA_STATE_NONE)
+			continue;
+		if (state != OBS_MEDIA_STATE_PLAYING) {
+			playout->items.array[i].seek_start = false;
+			continue;
+		}
+		if (obs_source_media_get_time(playout->items.array[i].source) <= (int64_t)playout->items.array[i].start)
+			continue;
+		if (!obs_source_get_width(playout->items.array[i].source))
+			continue;
+		playout->items.array[i].seek_start = false;
+		if (playout->current_source != playout->items.array[i].source) {
+			obs_source_media_play_pause(playout->items.array[i].source, true);
+		} else if (playout->auto_play && !playout->active) {
+			obs_source_media_play_pause(playout->items.array[i].source, true);
+		}
+	}
+
 	if (playout->switch_to_next) {
 		playout_source_switch_to_next_item(playout);
 		return;
+	}
+
+	if (playout->auto_play) {
+		bool old = playout->active;
+		playout->active = false;
+		obs_source_t *current = obs_get_output_source(0);
+		obs_source_enum_active_tree(current, playout_source_in_active_tree, playout);
+		obs_source_release(current);
+		if (old != playout->active) {
+			if (playout->active) {
+				playout_source_activate(playout);
+			} else {
+				playout_source_deactivate(playout);
+			}
+		}
 	}
 
 	if (!playout->playing)
@@ -347,40 +516,33 @@ static void playout_source_video_tick(void *data, float seconds)
 		return;
 
 	int64_t duration = obs_source_media_get_duration(playout->current_source);
-	if (!duration)
+	if (duration <= 0)
 		return;
 
 	int64_t time = obs_source_media_get_time(playout->current_source);
-	bool last = false;
-	if (playout->auto_play && !playout->loop && obs_frontend_preview_program_mode_active()) {
-		if (playout->playback_mode == PLAYBACK_MODE_LIST) {
-			last = playout->current_index == (int)playout->items.num - 1;
-		} else if (playout->playback_mode == PLAYBACK_MODE_SECTION) {
-			last = playout->current_index >= (int)playout->items.num - 1 ||
-			       (playout->items.array[playout->current_index].section &&
-				playout->items.array[playout->current_index + 1].section &&
-				strcmp(playout->items.array[playout->current_index].section,
-				       playout->items.array[playout->current_index + 1].section) != 0) ||
-			       (!playout->items.array[playout->current_index].section &&
-				playout->items.array[playout->current_index + 1].section) ||
-			       (playout->items.array[playout->current_index].section &&
-				!playout->items.array[playout->current_index + 1].section);
-		} else if (playout->playback_mode == PLAYBACK_MODE_SINGLE) {
-			last = true;
+	bool use_global_transition = playout_source_use_global_transition(playout);
+	bool last = playout_source_last(playout);
+
+	int64_t transition_duration = playout->items.array[playout->current_index].transition
+					      ? (int64_t)playout->items.array[playout->current_index].transition_duration_ms
+					      : 0;
+	if (last) {
+		if (playout->active && playout->auto_play && !playout->next_after_transition)
+			playout->next_after_transition = true;
+		if (use_global_transition) {
+			transition_duration = (int64_t)obs_frontend_get_transition_duration();
+		} else {
+			transition_duration = 0;
 		}
 	}
 
-	int64_t transition_duration = last ? (int64_t)obs_frontend_get_transition_duration()
-					   : (playout->items.array[playout->current_index].transition
-						      ? (int64_t)playout->items.array[playout->current_index].transition_duration_ms
-						      : 0);
 	if (time >= duration - transition_duration - (int64_t)playout->items.array[playout->current_index].end) {
-		if (last) {
+		if (use_global_transition && last) {
 			if (!playout->next_after_transition && obs_source_active(playout->source)) {
 				playout->next_after_transition = true;
 				obs_frontend_preview_program_trigger_transition();
 			}
-		} else {
+		} else if (!last) {
 			playout_source_switch_to_next_item(playout);
 		}
 	}
@@ -666,7 +828,7 @@ static bool playout_source_action(obs_properties_t *props, obs_property_t *prope
 			if (obs_data_get_bool(settings, setting_name.array)) {
 				dstr_printf(&setting_name, "transition_duration%d", i);
 				obs_data_set_int(settings, setting_name.array,
-						    obs_data_get_int(settings, "action_transition_duration"));
+						 obs_data_get_int(settings, "action_transition_duration"));
 			}
 		}
 	} else if (action == PLAYOUT_ACTION_SECTION_SELECTED) {
@@ -791,50 +953,6 @@ static void playout_source_video_render(void *data, gs_effect_t *effect)
 		obs_source_video_render(playout->current_source);
 }
 
-static void playout_source_activate(void *data)
-{
-	struct playout_source_context *playout = data;
-	if (!playout->auto_play)
-		return;
-	if (!playout->items.num)
-		return;
-	if (playout->current_index < 0 || playout->current_index >= (int)playout->items.num) {
-		playout->current_index = 0;
-		if (playout->current_source) {
-			obs_source_remove_active_child(playout->source, playout->current_source);
-			obs_source_release(playout->current_source);
-			obs_source_dec_showing(playout->current_source);
-		}
-		if (playout->current_transition) {
-			obs_source_remove_active_child(playout->source, playout->current_transition);
-			obs_source_dec_showing(playout->current_transition);
-			obs_source_release(playout->current_transition);
-			playout->current_transition = NULL;
-		}
-		playout->current_source = obs_source_get_ref(playout->items.array[playout->current_index].source);
-		if (playout->current_source) {
-			obs_source_remove_active_child(playout->source, playout->current_source);
-			obs_source_inc_showing(playout->current_source);
-		}
-		if (playout->items.array[playout->current_index].transition) {
-			obs_transition_set(playout->items.array[playout->current_index].transition, playout->current_source);
-			playout->current_transition = obs_source_get_ref(playout->items.array[playout->current_index].transition);
-			obs_source_inc_showing(playout->current_transition);
-			obs_source_add_active_child(playout->source, playout->current_transition);
-			playout->current_transition_duration = playout->items.array[playout->current_index].transition_duration_ms;
-		}
-	}
-	if (playout->current_source) {
-		enum obs_media_state state = obs_source_media_get_state(playout->current_source);
-		if (state == OBS_MEDIA_STATE_ENDED) {
-			obs_source_media_restart(playout->current_source);
-		}
-		obs_source_media_set_time(playout->current_source, playout->items.array[playout->current_index].start);
-		obs_source_media_play_pause(playout->current_source, false);
-	}
-	playout->playing = true;
-}
-
 int64_t playout_source_get_duration(void *data)
 {
 	struct playout_source_context *playout = data;
@@ -842,13 +960,20 @@ int64_t playout_source_get_duration(void *data)
 	if (!playout->current_source)
 		return 0;
 	int64_t duration = obs_source_media_get_duration(playout->current_source);
-	if (!duration)
+	if (duration <= 0)
 		return 0;
 	if (playout->current_index >= 0 && playout->current_index < (int)playout->items.num) {
 		duration -= playout->items.array[playout->current_index].start;
 		duration -= playout->items.array[playout->current_index].end;
 	}
-	duration -= playout->current_transition_duration;
+	int64_t transition_duration = playout->current_transition_duration;
+	if (playout_source_last(playout)) {
+		if (playout_source_use_global_transition(playout))
+			transition_duration = (int64_t)obs_frontend_get_transition_duration();
+		else
+			transition_duration = 0;
+	}
+	duration -= transition_duration;
 	return duration;
 }
 
@@ -893,12 +1018,20 @@ void playout_source_restart(void *data)
 {
 	struct playout_source_context *playout = data;
 	if (playout->current_source) {
-		obs_source_media_restart(playout->current_source);
-		if (playout->current_index >= 0 && playout->current_index < (int)playout->items.num &&
-		    playout->items.array[playout->current_index].start)
-			obs_source_media_set_time(playout->current_source, playout->items.array[playout->current_index].start);
-		else
-			obs_source_media_set_time(playout->current_source, 0);
+		enum obs_media_state state = obs_source_media_get_state(playout->current_source);
+		if (state == OBS_MEDIA_STATE_ENDED || state == OBS_MEDIA_STATE_STOPPED || state == OBS_MEDIA_STATE_NONE) {
+			obs_source_media_restart(playout->current_source);
+		} else {
+			if (playout->current_index >= 0 && playout->current_index < (int)playout->items.num &&
+			    playout->items.array[playout->current_index].start) {
+				obs_source_media_set_time(playout->current_source,
+							  playout->items.array[playout->current_index].start);
+				playout->items.array[playout->current_index].seek_start = true;
+			} else {
+				obs_source_media_set_time(playout->current_source, 0);
+			}
+			obs_source_media_play_pause(playout->current_source, false);
+		}
 	}
 	playout->playing = true;
 }
@@ -924,20 +1057,6 @@ void playout_source_previous(void *data)
 		return;
 	playout->current_index--;
 	playout_source_update_current_source(playout, true);
-}
-
-static void playout_source_frontend_event(enum obs_frontend_event event, void *data)
-{
-	struct playout_source_context *playout = data;
-	if (event == OBS_FRONTEND_EVENT_TRANSITION_STOPPED && playout->next_after_transition) {
-		if (playout->current_index >= (int)playout->items.num - 1) {
-			playout->current_index = 0;
-		} else {
-			playout->current_index++;
-		}
-		playout_source_update_current_source(playout, false);
-		playout->next_after_transition = false;
-	}
 }
 
 static void playout_source_enum_active_sources(void *data, obs_source_enum_proc_t enum_callback, void *param)
@@ -976,6 +1095,7 @@ struct obs_source_info playout_source = {
 	.media_get_time = playout_source_get_time,
 	.media_set_time = playout_source_set_time,
 	.activate = playout_source_activate,
+	.deactivate = playout_source_deactivate,
 	.enum_active_sources = playout_source_enum_active_sources,
 };
 
