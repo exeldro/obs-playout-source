@@ -16,9 +16,17 @@ void *audio_wrapper_create(obs_data_t *settings, obs_source_t *source)
 	return audio_wrapper;
 }
 
+static void audio_wrapper_audio_output_callback(void *param, size_t mix_idx, struct audio_data *data)
+{
+	UNUSED_PARAMETER(param);
+	UNUSED_PARAMETER(mix_idx);
+	UNUSED_PARAMETER(data);
+}
+
 void audio_wrapper_destroy(void *data)
 {
 	struct audio_wrapper_info *aw = (struct audio_wrapper_info *)data;
+	audio_output_disconnect(obs_get_audio(), 1, audio_wrapper_audio_output_callback, aw);
 	if (aw->playout)
 		aw->playout->audio_wrapper = NULL;
 	bfree(data);
@@ -29,7 +37,6 @@ bool audio_wrapper_render(void *data, uint64_t *ts_out, struct obs_source_audio_
 {
 	UNUSED_PARAMETER(ts_out);
 	UNUSED_PARAMETER(audio_mix);
-	UNUSED_PARAMETER(mixers);
 	UNUSED_PARAMETER(sample_rate);
 	struct audio_wrapper_info *aw = (struct audio_wrapper_info *)data;
 
@@ -40,6 +47,10 @@ bool audio_wrapper_render(void *data, uint64_t *ts_out, struct obs_source_audio_
 	if (obs_source_audio_pending(source)) {
 		obs_source_release(source);
 		return false;
+	}
+	if (!mixers) {
+		audio_output_disconnect(obs_get_audio(), 1, audio_wrapper_audio_output_callback, aw);
+		audio_output_connect(obs_get_audio(), 1, NULL, audio_wrapper_audio_output_callback, aw);
 	}
 
 	struct obs_source_audio_mix child_audio;

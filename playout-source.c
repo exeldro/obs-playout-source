@@ -302,7 +302,7 @@ static void playout_source_media_started(void *data, calldata_t *cd)
 		if (playout->items.array[i].source != source)
 			continue;
 		if (obs_source_media_get_time(source) < (int64_t)playout->items.array[i].start) {
-			obs_source_media_set_time(source, playout->items.array[i].start);			
+			obs_source_media_set_time(source, playout->items.array[i].start);
 		}
 		playout->items.array[i].seek_start = true;
 		break;
@@ -498,8 +498,10 @@ static void playout_source_video_tick(void *data, float seconds)
 		bool old = playout->active;
 		playout->active = false;
 		obs_source_t *current = obs_get_output_source(0);
-		obs_source_enum_active_tree(current, playout_source_in_active_tree, playout);
-		obs_source_release(current);
+		if (current) {
+			obs_source_enum_active_tree(current, playout_source_in_active_tree, playout);
+			obs_source_release(current);
+		}
 		if (old != playout->active) {
 			if (playout->active) {
 				playout_source_activate(playout);
