@@ -389,6 +389,10 @@ static void playout_source_update(void *data, obs_data_t *settings)
 			signal_handler_connect(sh, "media_ended", playout_source_media_ended, data);
 			signal_handler_connect(sh, "media_started", playout_source_media_started, data);
 		}
+		if (!playout->current_source && (i == playout->current_index || playout->current_index < 0)) {
+			playout->current_index = i;
+			playout_source_update_current_source(playout, false);
+		}
 		obs_data_t *ss = obs_data_create();
 		obs_data_set_bool(ss, "is_local_file", true);
 		obs_data_set_string(ss, "local_file", path);
